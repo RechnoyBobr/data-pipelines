@@ -1,0 +1,5 @@
+resources:
+  - manifests/namespace.yaml
+  - manifests/rbac.yaml
+  - manifests/workflowtemplates.yaml
+  - manifests/workflow.yaml

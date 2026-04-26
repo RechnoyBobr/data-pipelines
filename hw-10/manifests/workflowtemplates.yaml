@@ -1,0 +1,221 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: hw10-data-modules
+  namespace: argo
+spec:
+  templates:
+    - name: ingest-validate
+      inputs:
+        parameters:
+          - name: source_uri
+            default: /work/raw.csv
+          - name: clean_path
+            default: /work/clean.csv
+          - name: quarantine_path
+            default: /work/quarantine.csv
+          - name: required_columns
+            default: id,value
+      script:
+        image: python:3.11-slim
+        command: [python]
+        volumeMounts:
+          - name: workdir
+            mountPath: /work
+        source: |
+          import csv
+
+          source_uri = "{{inputs.parameters.source_uri}}"
+          clean_path = "{{inputs.parameters.clean_path}}"
+          quarantine_path = "{{inputs.parameters.quarantine_path}}"
+          required_columns = [c.strip() for c in "{{inputs.parameters.required_columns}}".split(",") if c.strip()]
+
+          with open(source_uri, "r", newline="") as f:
+              reader = csv.DictReader(f)
+              fieldnames = reader.fieldnames or []
+              missing = [c for c in required_columns if c not in fieldnames]
+              if missing:
+                  raise ValueError(f"Missing required columns: {missing}")
+
+              rows = list(reader)
+
+          valid_rows = []
+          invalid_rows = []
+          for row in rows:
+              if all(str(row.get(c, "")).strip() != "" for c in required_columns):
+                  valid_rows.append(row)
+              else:
+                  invalid_rows.append(row)
+
+          with open(clean_path, "w", newline="") as f:
+              writer = csv.DictWriter(f, fieldnames=fieldnames)
+              writer.writeheader()
+              writer.writerows(valid_rows)
+
+          with open(quarantine_path, "w", newline="") as f:
+              writer = csv.DictWriter(f, fieldnames=fieldnames)
+              writer.writeheader()
+              writer.writerows(invalid_rows)
+
+          with open("/tmp/rows_total.txt", "w") as f:
+              f.write(str(len(rows)))
+          with open("/tmp/rows_invalid.txt", "w") as f:
+              f.write(str(len(invalid_rows)))
+          with open("/tmp/clean_data_path.txt", "w") as f:
+              f.write(clean_path)
+
+          print(f"Ingested={len(rows)} valid={len(valid_rows)} invalid={len(invalid_rows)}")
+      outputs:
+        parameters:
+          - name: rows-total
+            valueFrom:
+              path: /tmp/rows_total.txt
+          - name: rows-invalid
+            valueFrom:
+              path: /tmp/rows_invalid.txt
+          - name: clean-data-path
+            valueFrom:
+              path: /tmp/clean_data_path.txt
+
+    - name: transform-rows
+      inputs:
+        parameters:
+          - name: input_path
+            default: /work/clean.csv
+          - name: output_path
+            default: /work/transformed.csv
+          - name: mode
+            default: normalize_value
+          - name: multiplier
+            default: "1.0"
+      script:
+        image: python:3.11-slim
+        command: [python]
+        volumeMounts:
+          - name: workdir
+            mountPath: /work
+        source: |
+          import csv
+
+          input_path = "{{inputs.parameters.input_path}}"
+          output_path = "{{inputs.parameters.output_path}}"
+          mode = "{{inputs.parameters.mode}}"
+          multiplier = float("{{inputs.parameters.multiplier}}")
+
+          with open(input_path, "r", newline="") as f:
+              reader = csv.DictReader(f)
+              fieldnames = reader.fieldnames or []
+              rows = list(reader)
+
+          if mode == "normalize_value" and "value" in fieldnames:
+              for row in rows:
+                  try:
+                      row["value"] = str(float(row["value"]) * multiplier)
+                  except (ValueError, TypeError, KeyError):
+                      row["value"] = "0"
+
+          with open(output_path, "w", newline="") as f:
+              writer = csv.DictWriter(f, fieldnames=fieldnames)
+              writer.writeheader()
+              writer.writerows(rows)
+
+          with open("/tmp/rows_in.txt", "w") as f:
+              f.write(str(len(rows)))
+          with open("/tmp/rows_out.txt", "w") as f:
+              f.write(str(len(rows)))
+          with open("/tmp/transformed_path.txt", "w") as f:
+              f.write(output_path)
+
+          print(f"Transformed rows={len(rows)} mode={mode}")
+      outputs:
+        parameters:
+          - name: rows-in
+            valueFrom:
+              path: /tmp/rows_in.txt
+          - name: rows-out
+            valueFrom:
+              path: /tmp/rows_out.txt
+          - name: transformed-path
+            valueFrom:
+              path: /tmp/transformed_path.txt
+
+    - name: aggregate-publish
+      inputs:
+        parameters:
+          - name: input_path
+            default: /work/transformed.csv
+          - name: report_path
+            default: /work/report.csv
+          - name: group_by
+            default: category
+          - name: metric_column
+            default: value
+          - name: target_uri
+            default: ""
+          - name: publish_mode
+            default: none
+      script:
+        image: python:3.11-slim
+        command: [python]
+        volumeMounts:
+          - name: workdir
+            mountPath: /work
+        source: |
+          import csv
+          import shutil
+
+          input_path = "{{inputs.parameters.input_path}}"
+          report_path = "{{inputs.parameters.report_path}}"
+          group_by = "{{inputs.parameters.group_by}}"
+          metric_column = "{{inputs.parameters.metric_column}}"
+          target_uri = "{{inputs.parameters.target_uri}}"
+          publish_mode = "{{inputs.parameters.publish_mode}}"
+
+          stats = {}
+          with open(input_path, "r", newline="") as f:
+              reader = csv.DictReader(f)
+              for row in reader:
+                  key = str(row.get(group_by, "unknown"))
+                  try:
+                      metric = float(row.get(metric_column, 0) or 0)
+                  except (ValueError, TypeError):
+                      metric = 0.0
+                  if key not in stats:
+                      stats[key] = {"sum": 0.0, "count": 0}
+                  stats[key]["sum"] += metric
+                  stats[key]["count"] += 1
+
+          with open(report_path, "w", newline="") as f:
+              writer = csv.DictWriter(f, fieldnames=["group_key", "sum_value", "count_rows"])
+              writer.writeheader()
+              for key, value in sorted(stats.items()):
+                  writer.writerow({
+                      "group_key": key,
+                      "sum_value": value["sum"],
+                      "count_rows": value["count"]
+                  })
+
+          publish_status = "skipped"
+          if publish_mode != "none" and target_uri:
+              shutil.copyfile(report_path, target_uri)
+              publish_status = f"published:{publish_mode}"
+
+          with open("/tmp/groups_count.txt", "w") as f:
+              f.write(str(len(stats)))
+          with open("/tmp/publish_status.txt", "w") as f:
+              f.write(publish_status)
+          with open("/tmp/report_path.txt", "w") as f:
+              f.write(report_path)
+
+          print(f"Groups={len(stats)} status={publish_status}")
+      outputs:
+        parameters:
+          - name: groups-count
+            valueFrom:
+              path: /tmp/groups_count.txt
+          - name: publish-status
+            valueFrom:
+              path: /tmp/publish_status.txt
+          - name: report-path
+            valueFrom:
+              path: /tmp/report_path.txt

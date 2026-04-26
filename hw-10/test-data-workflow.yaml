@@ -1,0 +1,99 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: hw10-data-processing-
+  namespace: argo
+spec:
+  serviceAccountName: hw10-data-pipeline-argo-workflows-workflow-controller
+  entrypoint: data-pipeline
+  volumeClaimTemplates:
+    - metadata:
+        name: workdir
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+  templates:
+    - name: data-pipeline
+      steps:
+        - - name: generate-data
+            template: generate-data
+        - - name: aggregate-data
+            template: aggregate-data
+
+    - name: generate-data
+      script:
+        image: python:3.11-slim
+        command: [python]
+        volumeMounts:
+          - name: workdir
+            mountPath: /work
+        source: |
+          import csv
+          import random
+
+          random.seed(42)
+          categories = ["books", "electronics", "grocery"]
+
+          with open('/work/raw.csv', 'w', newline='') as f:
+              writer = csv.writer(f)
+              writer.writerow(["id", "category", "amount"])
+              for i in range(1, 101):
+                  writer.writerow([i, random.choice(categories), random.randint(5, 250)])
+
+          with open('/tmp/rows_generated.txt', 'w') as f:
+              f.write('100')
+
+          print("Generated 100 rows in /work/raw.csv")
+      outputs:
+        parameters:
+          - name: rows-generated
+            valueFrom:
+              path: /tmp/rows_generated.txt
+
+    - name: aggregate-data
+      script:
+        image: python:3.11-slim
+        command: [python]
+        volumeMounts:
+          - name: workdir
+            mountPath: /work
+        source: |
+          import csv
+          import json
+          from collections import defaultdict
+
+          totals = defaultdict(int)
+          counts = defaultdict(int)
+
+          with open('/work/raw.csv', 'r') as f:
+              reader = csv.DictReader(f)
+              for row in reader:
+                  cat = row['category']
+                  amount = int(row['amount'])
+                  totals[cat] += amount
+                  counts[cat] += 1
+
+          with open('/work/summary.csv', 'w', newline='') as f:
+              writer = csv.writer(f)
+              writer.writerow(['category', 'count', 'total_amount', 'avg_amount'])
+              for cat in sorted(totals):
+                  avg = round(totals[cat] / counts[cat], 2)
+                  writer.writerow([cat, counts[cat], totals[cat], avg])
+
+          report = {
+              'rows_in': sum(counts.values()),
+              'categories': len(counts),
+              'totals': dict(totals)
+          }
+          with open('/tmp/report.json', 'w') as f:
+              json.dump(report, f, indent=2)
+
+          print('Aggregation complete:')
+          print(json.dumps(report, indent=2))
+      outputs:
+        parameters:
+          - name: report-json
+            valueFrom:
+              path: /tmp/report.json

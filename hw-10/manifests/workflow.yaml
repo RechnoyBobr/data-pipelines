@@ -1,0 +1,146 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: hw10-data-pipeline-run
+  namespace: argo
+spec:
+  entrypoint: main
+  volumeClaimTemplates:
+    - metadata:
+        name: workdir
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+  templates:
+    - name: main
+      dag:
+        tasks:
+          - name: generate-source-data
+            template: generate-source-data
+
+          - name: ingest
+            dependencies: [generate-source-data]
+            templateRef:
+              name: hw10-data-modules
+              template: ingest-validate
+            arguments:
+              parameters:
+                - name: source_uri
+                  value: /work/raw.csv
+                - name: clean_path
+                  value: /work/clean.csv
+                - name: quarantine_path
+                  value: /work/quarantine.csv
+                - name: required_columns
+                  value: id,category,value
+
+          - name: transform
+            dependencies: [ingest]
+            templateRef:
+              name: hw10-data-modules
+              template: transform-rows
+            arguments:
+              parameters:
+                - name: input_path
+                  value: "{{tasks.ingest.outputs.parameters.clean-data-path}}"
+                - name: output_path
+                  value: /work/transformed.csv
+                - name: mode
+                  value: normalize_value
+                - name: multiplier
+                  value: "1.2"
+
+          - name: aggregate
+            dependencies: [transform]
+            templateRef:
+              name: hw10-data-modules
+              template: aggregate-publish
+            arguments:
+              parameters:
+                - name: input_path
+                  value: "{{tasks.transform.outputs.parameters.transformed-path}}"
+                - name: report_path
+                  value: /work/report.csv
+                - name: group_by
+                  value: category
+                - name: metric_column
+                  value: value
+                - name: publish_mode
+                  value: none
+                - name: target_uri
+                  value: ""
+
+          - name: print-summary
+            dependencies: [ingest, transform, aggregate]
+            template: print-summary
+            arguments:
+              parameters:
+                - name: rows_total
+                  value: "{{tasks.ingest.outputs.parameters.rows-total}}"
+                - name: rows_invalid
+                  value: "{{tasks.ingest.outputs.parameters.rows-invalid}}"
+                - name: rows_out
+                  value: "{{tasks.transform.outputs.parameters.rows-out}}"
+                - name: groups_count
+                  value: "{{tasks.aggregate.outputs.parameters.groups-count}}"
+                - name: report_path
+                  value: "{{tasks.aggregate.outputs.parameters.report-path}}"
+
+    - name: generate-source-data
+      script:
+        image: python:3.11-slim
+        command: [python]
+        volumeMounts:
+          - name: workdir
+            mountPath: /work
+        source: |
+          import csv
+          import random
+
+          random.seed(42)
+          rows = []
+          categories = ["A", "B", "C"]
+          for i in range(1, 101):
+              rows.append({
+                  "id": i,
+                  "category": random.choice(categories),
+                  "value": round(random.uniform(10, 100), 2)
+              })
+
+          with open("/work/raw.csv", "w", newline="") as f:
+              writer = csv.DictWriter(f, fieldnames=["id", "category", "value"])
+              writer.writeheader()
+              writer.writerows(rows)
+
+          print("Generated /work/raw.csv with 100 rows")
+
+    - name: print-summary
+      inputs:
+        parameters:
+          - name: rows_total
+          - name: rows_invalid
+          - name: rows_out
+          - name: groups_count
+          - name: report_path
+      script:
+        image: python:3.11-slim
+        command: [python]
+        volumeMounts:
+          - name: workdir
+            mountPath: /work
+        source: |
+          rows_total = "{{inputs.parameters.rows_total}}"
+          rows_invalid = "{{inputs.parameters.rows_invalid}}"
+          rows_out = "{{inputs.parameters.rows_out}}"
+          groups_count = "{{inputs.parameters.groups_count}}"
+          report_path = "{{inputs.parameters.report_path}}"
+
+          print("Pipeline summary")
+          print(f"rows_total={rows_total}")
+          print(f"rows_invalid={rows_invalid}")
+          print(f"rows_out={rows_out}")
+          print(f"groups_count={groups_count}")
+          print(f"report_path={report_path}")
