@@ -42,7 +42,7 @@
 - Spark: `spark_executor_memory_used_bytes{application_id,executor_id}` - память, используемая executor-ом (heap+offheap если доступно).
 
 - JVM/process: `process_cpu_seconds_total{pod,container,namespace,app}`, `process_resident_memory_bytes{...}`, `jvm_gc_pause_seconds_sum/count`.
-	- Полезно для диагностики GC и поведения JVM, даже при наличии контейнерных метрик.
+	- Полезно для диагностики GC и поведения JVM.
 
 - Kubernetes infra: `kube_pod_container_status_restarts_total{pod,namespace,container}`, `container_memory_usage_bytes{pod,namespace,container}`, `container_cpu_usage_seconds_total{pod,namespace,container}`.
 
@@ -123,20 +123,16 @@
 Проблема:
 - Batch Spark-джобы часто живут секунды-минуты; если метрики публикуются через обычный HTTP-exporter и Prometheus scrapes по расписанию, scrape может не успеть - метрики теряются.
 
-Рассмотренные подходы и рекомендации:
+Возможные решения
 
 1) Pushgateway
-	- Паттерн: в конце выполнения джоба job пушит итоговые метрики (processed_rows, errors, duration) в Pushgateway с метками `application_id`, `job_id`, `status`.
+	- В конце выполнения job пушит итоговые метрики (processed_rows, errors, duration) в Pushgateway с метками `application_id`, `job_id`, `status`.
 	- Prometheus периодически скрейпит Pushgateway; Grafana использует эти метрики для отчетов.
-	- Плюсы: простота, надёжность для финальных метрик.
-	- Минусы: Pushgateway не предназначен для лёгкой временной метрики, надо аккуратно управлять life-cycle (удаление старых метрик).
+    Считаю самым подходящим решением, но требуется настройка самого гейтвея.
 
-2) Sidecar exporter / In-pod HTTP endpoint
-	- Паттерн: вместе с джобом запускается короткоживущий sidecar, который отдает метрики до тех пор, пока pod жив. Если Prometheus успеет - скрейпит напрямую.
-	- Плюсы: гибкость, можно отдавать rich-metrics; минусы: повышенная сложность, требует синхронизации.
-
-4) Spark event logs + post-processing
+2) Spark event logs + post-processing
 	- Spark может писать event logs (History Server). Отдельный ETL/processor конвертирует логи в метрики и пушит их в Prometheus (через Pushgateway / custom exporter).
+    Лично считаю, что это чуть менее подходящее решение, так как это также экспортирует метрики в экспортер / pushgateway, но требует настройки event логов.
 
 5. Примерная схема архитектуры
 ```mermaid
